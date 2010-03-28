@@ -19,6 +19,7 @@ C<logfilebayes.pl --database=>I<dbpath> --bookmark=>I<bookmarkfile> --logfile=>I
 use Getopt::Long;
 use English;
 use Pod::Usage;
+use Fcntl qw(SEEK_SET);
 
 my $learn = undef;
 my $database = undef;
@@ -32,8 +33,8 @@ Getopt::Long::GetOptions(
 			 'learn:s' => \$learn,
 			 'database:s' => \$database,
 			 'rate!' => \$rate,
-			 'bookmark' => \$bookmark,
-			 'logfile' => \$logfile,
+			 'bookmark:s' => \$bookmark,
+			 'logfile:s' => \$logfile,
 			 'explain!' => \$explain
 )  or pod2usage(2);
 
@@ -82,46 +83,58 @@ WORD:
 die "Logfile not specified" if defined $bookmark and not defined $logfile;
 die "Bookmark not specified" if not defined $bookmark and defined $logfile;
 
+my @stat_struct;
 if (defined $bookmark and defined $logfile) {
   open(LOGFILE,$logfile) || die "Could not read $logfile";
   # should lock bookmark file for reading. Probably don't need to
   # lock logfile for reading... or do we?
   my $position;
   if (!open(BOOKMARK,$bookmark)) {
-    $position = 
-      # have to stat LOGFILE here
+    @stat_struct = stat $logfile; 
+    $position = $stat_struct[2];
+  } else {
+    $position = <BOOKMARK>;
+    chomp $position;
+    close(BOOKMARK);
   }
+  @stat_struct = stat $logfile;
+  if ($stat_struct[2] < $position) {
+      $position = $stat_struct[2];
+  }
+  seek(LOGFILE,$position,SEEK_SET);
   while (<LOGFILE>) {
-  $message_text = join(" ",@ARGV);
-  my @message_words =  &text_to_words($message_text);
-  my $word;
-  my %weighting_hash;
-  foreach $word (@message_words) { $weighting_hash{$word} = 1;}
-  my $result = $nb->predict(attributes => \%weighting_hash);
-  my $best_score = 0.0;
-  my $best = "";
-  my $each_result;
-  foreach $each_result (keys %$result) {
-    if ($result->{$each_result} > $best_score) {
-      $best = $each_result;
-      $best_score = $result->{$each_result};
+    $message_text = join(" ",@ARGV);
+    my @message_words =  &text_to_words($message_text);
+    my $word;
+    my %weighting_hash;
+    foreach $word (@message_words) { $weighting_hash{$word} = 1;}
+    my $result = $nb->predict(attributes => \%weighting_hash);
+    my $best_score = 0.0;
+    my $best = "";
+    my $each_result;
+    foreach $each_result (keys %$result) {
+      if ($result->{$each_result} > $best_score) {
+        $best = $each_result;
+        $best_score = $result->{$each_result};
+      }
+      print STDERR "Score for \U$each_result\E is $result->{$each_result}.\n"
+        if $explain;
     }
-    print STDERR "Score for \U$each_result\E is $result->{$each_result}.\n"
-      if $explain;
+    my %word_effects;
+    foreach $word (@message_words) {
+      $result = $nb->predict(attributes => { $word => 1 });
+      print STDERR "  '$word' contributed $result->{$best}\n" if $explain;
+      $word_effects{$word} = $result->{$best};
+    }
+    my @important_words = sort {  $word_effects{$b} <=> $word_effects{$a} }
+                                                    (keys %word_effects);
+    @important_words = @important_words[0..2];
+    @important_words = grep($word_effects{$_} > 0.1,@important_words);
+    my $pretext = $#important_words == -1 ? "" : 
+      "{".join("} {",@important_words)."} ";
+    print "\U$best\E\t\t$message_text\t$pretext\n";
   }
-  my %word_effects;
-  foreach $word (@message_words) {
-    $result = $nb->predict(attributes => { $word => 1 });
-    print STDERR "  '$word' contributed $result->{$best}\n" if $explain;
-    $word_effects{$word} = $result->{$best};
-  }
-  my @important_words = sort {  $word_effects{$b} <=> $word_effects{$a} }
-    (keys %word_effects);
-  @important_words = @important_words[0..2];
-  @important_words = grep($word_effects{$_} > 0.1,@important_words);
-  my $pretext = $#important_words == -1 ? "" : 
-    "{".join("} {",@important_words)."} ";
-  print "\U$best\E\t\t$message_text\t$pretext\n";
+  open(BOOKMARK,">$bookmark");
   exit(0);
 }
 
