@@ -5,13 +5,96 @@ use strict;
 
 logfilebayes.pl - Bayesian log file reader
 
-=head SYNOPSYS
+=head1 SYNOPSYS
 
 C<logfilebayes.pl --database=>I<dbpath> C<--learn=>I<severity> I<text>
 
 C<logfilebayes.pl --database=>I<dbpath> C<--rate> I<text>
 
-C<logfilebayes.pl --database=>I<dbpath> --bookmark=>I<bookmarkfile> --logfile=>I<logfile>
+C<logfilebayes.pl --database=>I<dbpath> --bookmark=>I<bookmarkfile> --logfile=>I<logfile> [--explain] [--autolearn]
+
+=head1 OPTIONS
+
+=over 4
+
+=item C<--database=>I<dbpath>
+
+This is the only required argument. It is the path to the stored
+Bayesian database. If it does not already exist, the database is created.
+It is best not to share databases; no locking is performed.
+
+=item C<--learn=>I<severity>
+
+Used to invoke manual training mode. The severity must be one of:
+
+=over 8 
+
+=item ignore
+
+=item warning
+
+=item normal
+
+=item minor
+
+=item major
+
+=item critical
+
+=back
+
+It is case insensitive. The remaining command-line arguments are assumed
+to be words which should be associated with the given severity.
+
+Note that this is not guaranteed to mean that future references to those
+words will force that severity -- it just increases the likelihood.
+
+It does make sense to run the same C<--learn> several times if you want
+to strongly encourage C<logfilebayes.pl> to use that severity.
+
+=item C<--rate>
+
+The remaining command-line arguments are assumed to be words in a
+sentence.  This will report what severity level would have been
+reported if that sentence had been found in a logfile.
+
+=item C<--bookmark=>I<bookmarkfile>
+
+Must be used in conjunction with C<--logfile>. C<logfilebayes.pl> only reads
+the logfile from where it left off last time. The previous position is stored
+in plain text in the file I<bookmarkfile>.
+
+No locking is done on the bookmark file.
+
+=item C<--logfile=>I<logfile>
+
+Must be used in conjunction with C<--bookmark>. Read the given I<logfile>
+from the last-read position (read out of the bookmark file).
+
+If this is the first time C<logfilebayes.pl> has been run, it writes
+the current size of I<logfile> into the bookmark file and then exits.
+
+Otherwise, take each new line of text from I<logfile>, rate it according
+to the data found in the I<dbpath> and report what tag is most likely to 
+be appropriate for that line.
+
+The output is:
+
+  rating<TAB><TAB>text<TAB>most significant word<TAB>next most<TAB>next
+
+=item C<--explain>
+
+Provide verbose output about each line of output.
+
+=item C<--autolearn>
+
+Feed each line of logfile text back into the rating engine for
+learning after a "most likely" tag has been already found. In this
+way, it will learn more words commonly found in (critical, ignore,
+etc.) messages.
+
+
+=back
 
 =cut
 
@@ -27,6 +110,7 @@ my $rate = 1;
 my $bookmark = undef;
 my $logfile = undef;
 my $explain = undef;
+my $autolearn = undef;
 my $message_text;
 
 Getopt::Long::GetOptions(
@@ -35,7 +119,8 @@ Getopt::Long::GetOptions(
 			 'rate!' => \$rate,
 			 'bookmark:s' => \$bookmark,
 			 'logfile:s' => \$logfile,
-			 'explain!' => \$explain
+			 'explain!' => \$explain,
+			 'autolearn' => \$autolearn
 )  or pod2usage(2);
 
 die "Must specify --database. Exiting\n" unless defined $database;
@@ -91,19 +176,20 @@ if (defined $bookmark and defined $logfile) {
   my $position;
   if (!open(BOOKMARK,$bookmark)) {
     @stat_struct = stat $logfile; 
-    $position = $stat_struct[2];
+    $position = $stat_struct[7];
   } else {
     $position = <BOOKMARK>;
     chomp $position;
     close(BOOKMARK);
+    if ($position !~ /^\d+$/) { $position = 0; } # or should I reset to the end?
   }
   @stat_struct = stat $logfile;
-  if ($stat_struct[2] < $position) {
+  if ($stat_struct[7] < $position) {
       $position = $stat_struct[2];
   }
   seek(LOGFILE,$position,SEEK_SET);
-  while (<LOGFILE>) {
-    $message_text = join(" ",@ARGV);
+  $position = tell LOGFILE;
+  while ($message_text = <LOGFILE>) {
     my @message_words =  &text_to_words($message_text);
     my $word;
     my %weighting_hash;
@@ -133,8 +219,17 @@ if (defined $bookmark and defined $logfile) {
     my $pretext = $#important_words == -1 ? "" : 
       "{".join("} {",@important_words)."} ";
     print "\U$best\E\t\t$message_text\t$pretext\n";
+    if ($autolearn) {
+      $nb->add_instance(attributes => \%weighting_hash,label => $best);
+      $nb->train();
+    }
   }
+  # locking needed here?
   open(BOOKMARK,">$bookmark");
+  $position = tell (LOGFILE);
+  print BOOKMARK "$position\n";
+  close(BOOKMARK);
+  $nb->save_state($database);
   exit(0);
 }
 
@@ -143,12 +238,11 @@ if (defined $learn) {
   $message_text = join(" ",@ARGV);
   my @message_words;
   $message_text =~ s/\s*$//;
-   @message_words = &text_to_words($message_text);
-   my $word;
-   my %weighting_hash;
-   foreach $word (@message_words) { $weighting_hash{$word} = 1;}
-   $nb->add_instance(attributes => \%weighting_hash,
-                     label => $learn);
+  @message_words = &text_to_words($message_text);
+  my $word;
+  my %weighting_hash;
+  foreach $word (@message_words) { $weighting_hash{$word} = 1;}
+  $nb->add_instance(attributes => \%weighting_hash,label => $learn);
   $nb->train();
   $nb->save_state($database);
 }
